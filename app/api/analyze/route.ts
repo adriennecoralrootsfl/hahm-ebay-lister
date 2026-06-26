@@ -2,21 +2,27 @@ import { NextRequest, NextResponse } from "next/server";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getClient, parseModelJson, AnthropicAuthError, anthropicAuthError } from "@/lib/anthropic";
 import { guardApiRequest, safeErrorResponse } from "@/lib/api-guard";
-import {
-  PROFILE_ROUTER_PROMPT,
-  buildProfiledAnalysisPrompt,
-  normalizeItemProfile,
-} from "@/lib/prompts";
+import { buildProfiledAnalysisPrompt } from "@/lib/prompts";
 import { toImageBlock, type ImageBlock } from "@/lib/images";
 import { resolveModel } from "@/lib/models";
 import type { AnalyzeRequestBody, ListingResult } from "@/lib/types";
 
-// Analysis can take 20-40s for a multi-photo item. Give it room.
 export const maxDuration = 60;
 
-const ANALYSIS_MODEL = "claude-opus-4-8";
-const ROUTER_MODEL = "claude-sonnet-4-6";
+const ANALYSIS_MODEL = "claude-sonnet-4-6";
 const MAX_IMAGES = 12;
+
+// ---- COST ESTIMATE (approx, you can tune later) ----
+// These are rough averages; real cost depends on token usage.
+const COST_PER_INPUT_TOKEN = 0.000003;   // Sonnet approx
+const COST_PER_OUTPUT_TOKEN = 0.000015;
+
+function estimateCost(inputTokens = 0, outputTokens = 0) {
+  return (
+    inputTokens * COST_PER_INPUT_TOKEN +
+    outputTokens * COST_PER_OUTPUT_TOKEN
+  );
+}
 
 function toImageBlocks(images: AnalyzeRequestBody["images"]): ImageBlock[] {
   const blocks: ImageBlock[] = [];
@@ -25,42 +31,6 @@ function toImageBlocks(images: AnalyzeRequestBody["images"]): ImageBlock[] {
     if (block) blocks.push(block);
   }
   return blocks;
-}
-
-// Mirrors route_item_profile(): honor a forced profile, else ask the model.
-async function routeProfile(
-  client: Anthropic,
-  imageBlocks: ImageBlock[],
-  requested: string,
-  routerModel: string
-): Promise<string> {
-  const forced = normalizeItemProfile(requested);
-  if (forced !== "auto") return forced;
-
-  try {
-    const resp = await client.messages.create({
-      model: routerModel,
-      max_tokens: 300,
-      messages: [
-        {
-          role: "user",
-          content: [
-            ...imageBlocks,
-            { type: "text", text: PROFILE_ROUTER_PROMPT },
-          ],
-        },
-      ],
-    });
-    const text = firstText(resp);
-    const data = parseModelJson<{ profile?: string }>(text);
-    const routed = normalizeItemProfile(data?.profile ?? "auto");
-    return routed !== "auto" ? routed : "hard_goods";
-  } catch (e) {
-    // Auth/billing failures must surface, not silently fall back to a profile.
-    const fatal = anthropicAuthError(e);
-    if (fatal) throw fatal;
-    return "hard_goods";
-  }
 }
 
 function firstText(resp: Anthropic.Message): string {
@@ -73,6 +43,7 @@ export async function POST(req: NextRequest) {
   if (denied) return denied;
 
   let body: AnalyzeRequestBody;
+
   try {
     body = (await req.json()) as AnalyzeRequestBody;
   } catch {
@@ -82,12 +53,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Validate client-supplied models against the server allowlist; fall back to
-  // the trusted default on anything unknown (prevents billing an arbitrary or
-  // premium model to the owner's key).
-  const analysisModel = resolveModel(body.analysisModel, ANALYSIS_MODEL);
-  const routerModel = resolveModel(body.routerModel, ROUTER_MODEL);
-
   if (!Array.isArray(body.images) || body.images.length === 0) {
     return NextResponse.json(
       { ok: false, error: "Please add at least one photo." },
@@ -96,6 +61,7 @@ export async function POST(req: NextRequest) {
   }
 
   const imageBlocks = toImageBlocks(body.images);
+
   if (imageBlocks.length === 0) {
     return NextResponse.json(
       { ok: false, error: "No readable photos found. Use JPG, PNG, or WebP." },
@@ -104,6 +70,7 @@ export async function POST(req: NextRequest) {
   }
 
   let client: Anthropic;
+
   try {
     client = getClient();
   } catch (e) {
@@ -114,56 +81,67 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const profile = await routeProfile(client, imageBlocks, body.profile, routerModel);
-    const systemPrompt = buildProfiledAnalysisPrompt(profile);
+    const systemPrompt = buildProfiledAnalysisPrompt("hard_goods");
 
-    // Retry up to 3 times, mirroring the Python analyze_photos() loop.
-    let lastErr: unknown = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const resp = await client.messages.create({
-          model: analysisModel,
-          max_tokens: 3000,
-          // System prompt is large and identical across requests for the same
-          // profile — cache it to cut cost and latency.
-          system: [
+    const resp = await client.messages.create({
+      model: ANALYSIS_MODEL,
+      max_tokens: 1800,
+      system: [
+        {
+          type: "text",
+          text: systemPrompt,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            ...imageBlocks,
             {
               type: "text",
-              text: systemPrompt,
-              cache_control: { type: "ephemeral" },
+              text: "Analyze these photos and return ONLY valid listing JSON.",
             },
           ],
-          messages: [
-            {
-              role: "user",
-              content: [
-                ...imageBlocks,
-                {
-                  type: "text",
-                  text: "Analyze these photos and return the listing JSON now.",
-                },
-              ],
-            },
-          ],
-        });
-        const listing = parseModelJson<ListingResult>(firstText(resp));
-        listing.item_profile = profile;
-        return NextResponse.json({ ok: true, listing });
-      } catch (err) {
-        const fatal = anthropicAuthError(err);
-        if (fatal) throw fatal; // auth/billing won't fix itself on retry
-        lastErr = err;
-        if (attempt < 2) {
-          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
-        }
-      }
-    }
-    throw lastErr;
+        },
+      ],
+    });
+
+    const text = firstText(resp);
+    const listing = parseModelJson<ListingResult>(text);
+
+    // -----------------------------
+    // 💰 COST METER (simple + useful)
+    // -----------------------------
+    const usage = (resp as any).usage;
+
+    const inputTokens = usage?.input_tokens ?? 0;
+    const outputTokens = usage?.output_tokens ?? 0;
+
+    const estimatedCost = estimateCost(inputTokens, outputTokens);
+
+    return NextResponse.json({
+      ok: true,
+      listing,
+      usage: {
+        inputTokens,
+        outputTokens,
+        estimatedCostUsd: Number(estimatedCost.toFixed(4)),
+      },
+    });
   } catch (e) {
-    if (e instanceof AnthropicAuthError) {
-      console.error("[analyze] auth/billing failure:", e.message);
-      return NextResponse.json({ ok: false, error: e.message }, { status: e.status });
+    const fatal = anthropicAuthError(e);
+    if (fatal) {
+      return NextResponse.json(
+        { ok: false, error: fatal.message },
+        { status: fatal.status }
+      );
     }
-    return safeErrorResponse("analyze", e, "Something went wrong analyzing photos — please try again.");
+
+    return safeErrorResponse(
+      "analyze",
+      e,
+      "Something went wrong analyzing photos — please try again."
+    );
   }
 }
