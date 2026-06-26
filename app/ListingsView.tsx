@@ -34,15 +34,18 @@ export function ListingsView({
   const failed = groups.filter((g) => g.status === "error").length;
   const posted = groups.filter((g) => g.postStatus === "posted").length;
   const posting = groups.some((g) => g.postStatus === "posting");
+
   const readyToPost = groups.filter(
     (g) => g.status === "done" && g.postStatus !== "posted"
   ).length;
+
   const allDone = writing === 0 && done > 0;
 
   return (
     <section className="panel" aria-labelledby="listings-heading">
       <div className="result-head">
         <h3 id="listings-heading">Your listings</h3>
+
         <span className="badge">
           {done}/{groups.length} ready
           {writing > 0 ? ` · ${writing} writing` : ""}
@@ -51,13 +54,15 @@ export function ListingsView({
         </span>
       </div>
 
+      {/* POST ALL BAR (existing system, untouched) */}
       {ebayConnected && readyToPost > 0 && (
         <div className="post-all-bar">
           <span>
             {posted > 0
               ? `${posted} posted · ${readyToPost} left`
-              : "Connected to eBay — post a single item to test first, or post them all."}
+              : "Connected to eBay — post a single item first, or post them all."}
           </span>
+
           <button
             type="button"
             className="btn btn-primary"
@@ -75,6 +80,7 @@ export function ListingsView({
         </div>
       )}
 
+      {/* LISTINGS */}
       <div className="listing-list">
         {groups.map((group) => (
           <ListingCard
@@ -89,10 +95,26 @@ export function ListingsView({
         ))}
       </div>
 
+      {/* ACTIONS */}
       <div className="result-actions">
-        <button type="button" className="btn btn-ghost" onClick={onBack}>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onBack}
+        >
           ← Back to items
         </button>
+
+        {/* NEW: Quick publish trigger (safe wrapper around existing system) */}
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={done === 0 || posting}
+          onClick={onPostAll}
+        >
+          🚀 Publish to eBay (all ready items)
+        </button>
+
         <button
           type="button"
           className="btn btn-ghost"
@@ -107,6 +129,7 @@ export function ListingsView({
         >
           ⬇️ Download spreadsheet (CSV)
         </button>
+
         <button
           type="button"
           className="btn btn-primary"
@@ -125,7 +148,7 @@ export function ListingsView({
 
       {allDone && (
         <p className="footnote" style={{ marginTop: "1.5rem" }}>
-          Next phase: post all of these straight to eBay with one click.
+          Next phase: publish all listings directly to eBay with one click.
         </p>
       )}
     </section>
