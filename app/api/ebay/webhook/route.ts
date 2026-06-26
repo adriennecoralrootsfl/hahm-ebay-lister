@@ -1,20 +1,38 @@
-export async function POST(req: Request) {
-  const body = await req.json().catch(() => ({}));
+import crypto from "crypto";
 
-  // eBay verification check (Marketplace Account Deletion)
-  if (body?.challenge_code) {
-    return new Response(
-      JSON.stringify({ challengeResponse: body.challenge_code }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }
-    );
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+
+  const challengeCode = url.searchParams.get("challenge_code");
+
+  if (!challengeCode) {
+    return new Response("OK", { status: 200 });
   }
 
-  return new Response("OK", { status: 200 });
+  const verificationToken =
+    process.env.EBAY_VERIFICATION_TOKEN ||
+    "swfl_lister_verification_token_2026_secure_key_7f3a9c2b";
+
+  const endpoint =
+    "https://hahm-ebay-lister-five.vercel.app/api/ebay/webhook";
+
+  const hash = crypto.createHash("sha256");
+
+  hash.update(challengeCode);
+  hash.update(verificationToken);
+  hash.update(endpoint);
+
+  const challengeResponse = hash.digest("hex");
+
+  return new Response(
+    JSON.stringify({ challengeResponse }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }
+  );
 }
 
-export async function GET() {
+export async function POST() {
   return new Response("OK", { status: 200 });
 }
