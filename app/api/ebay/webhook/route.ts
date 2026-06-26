@@ -2,7 +2,6 @@ import crypto from "crypto";
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-
   const challengeCode = url.searchParams.get("challenge_code");
 
   if (!challengeCode) {
@@ -13,6 +12,7 @@ export async function GET(req: Request) {
     process.env.EBAY_VERIFICATION_TOKEN ||
     "swfl_lister_verification_token_2026_secure_key_7f3a9c2b";
 
+  // IMPORTANT: must match EXACT public endpoint (no trailing slash)
   const endpoint =
     "https://hahm-ebay-lister-five.vercel.app/api/ebay/webhook";
 
@@ -28,11 +28,14 @@ export async function GET(req: Request) {
     JSON.stringify({ challengeResponse }),
     {
       status: 200,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json"
+      }
     }
   );
 }
 
-export async function POST() {
-  return new Response("OK", { status: 200 });
+export async function POST(req: Request) {
+  // MUST ACK ALL EVENTS IMMEDIATELY
+  return new Response(null, { status: 204 });
 }
